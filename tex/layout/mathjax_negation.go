@@ -1,0 +1,76 @@
+package layout
+
+import "github.com/luo-studio/go-tex/tex/parser"
+
+// Pinned MathJax BaseItems.NotItem and BaseMappings.not_remap (Apache-2.0).
+// Fold the parser's canonical combining-not token before a mapped relation.
+// Unmapped/compound bases keep the entire expression on the fallback pipeline.
+func mathJaxNegations(nodes []parser.Node) []parser.Node {
+	out := make([]parser.Node, 0, len(nodes))
+	for i := 0; i < len(nodes); i++ {
+		if n, ok := nodes[i].(*parser.HtmlMathMl); ok && len(n.MathMl) == 1 && i+1 < len(nodes) {
+			mark, yes := n.MathMl[0].(*parser.TextOrd)
+			next, relation := nodes[i+1].(*parser.Atom)
+			if yes && mark.Text == "\u0338" && relation {
+				cp := resolveCodepoint(next.Text, 0, next.Mode)
+				if replacement, found := mathJaxNotRemap[cp]; found {
+					copy := *next
+					copy.Text = string(replacement)
+					out = append(out, &copy)
+					i++
+					continue
+				}
+			}
+		}
+		out = append(out, nodes[i])
+	}
+	return out
+}
+
+var mathJaxNotRemap = map[rune]rune{
+	0x2190: 0x219A,
+	0x2192: 0x219B,
+	0x2194: 0x21AE,
+	0x21D0: 0x21CD,
+	0x21D2: 0x21CF,
+	0x21D4: 0x21CE,
+	0x2208: 0x2209,
+	0x220B: 0x220C,
+	0x2223: 0x2224,
+	0x2225: 0x2226,
+	0x223C: 0x2241,
+	0x7E:   0x2241,
+	0x2243: 0x2244,
+	0x2245: 0x2247,
+	0x2248: 0x2249,
+	0x224D: 0x226D,
+	0x3D:   0x2260,
+	0x2261: 0x2262,
+	0x3C:   0x226E,
+	0x3E:   0x226F,
+	0x2264: 0x2270,
+	0x2265: 0x2271,
+	0x2272: 0x2274,
+	0x2273: 0x2275,
+	0x2276: 0x2278,
+	0x2277: 0x2279,
+	0x227A: 0x2280,
+	0x227B: 0x2281,
+	0x2282: 0x2284,
+	0x2283: 0x2285,
+	0x2286: 0x2288,
+	0x2287: 0x2289,
+	0x22A2: 0x22AC,
+	0x22A8: 0x22AD,
+	0x22A9: 0x22AE,
+	0x22AB: 0x22AF,
+	0x227C: 0x22E0,
+	0x227D: 0x22E1,
+	0x2291: 0x22E2,
+	0x2292: 0x22E3,
+	0x22B2: 0x22EA,
+	0x22B3: 0x22EB,
+	0x22B4: 0x22EC,
+	0x22B5: 0x22ED,
+	0x2203: 0x2204,
+}

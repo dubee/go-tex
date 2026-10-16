@@ -18,8 +18,8 @@ const (
 
 // spacingTable is TeXbook p.170 Table 18 in mu (1mu = 1/18 em).
 //
-//	  rows = left, cols = right
-//	  order: Ord, Op, Bin, Rel, Open, Close, Punct, Inner
+//	rows = left, cols = right
+//	order: Ord, Op, Bin, Rel, Open, Close, Punct, Inner
 var spacingTable = [8][8]int8{
 	/*Ord*/ {0, 3, 4, 5, 0, 0, 0, 3},
 	/*Op*/ {3, 4, 0, 5, 0, 0, 0, 3},

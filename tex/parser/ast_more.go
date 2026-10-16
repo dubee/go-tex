@@ -10,6 +10,7 @@ package parser
 type GenFrac struct {
 	Mode       Mode         `json:"mode"`
 	Continued  bool         `json:"continued"`
+	Align      string       `json:"align,omitempty"` // Optional cfrac alignment: l or r.
 	Numer      Node         `json:"numer"`
 	Denom      Node         `json:"denom"`
 	HasBarLine bool         `json:"hasBarLine"`

@@ -1,6 +1,8 @@
 package layout
 
 import (
+	"github.com/luo-studio/go-tex/tex/colors"
+	"math"
 	"strings"
 
 	"github.com/luo-studio/go-tex/tex/fontmetrics"
@@ -211,6 +213,11 @@ func layoutOpSymbol(name string, opts Options) *Box {
 	if large {
 		font = fontmetrics.FontSize2Regular
 	}
+	if opts.MathJaxGlyphs {
+		if g, ok := pinnedMathJaxGlyph(font, cp); ok {
+			return &Box{Width: g.Width, Height: g.Height, Depth: g.Depth, Color: opts.Color, Content: Glyph{FontID: font, CharCode: cp, Outline: g.commands}}
+		}
+	}
 	cm, found := fontmetrics.Lookup(font, cp)
 	if !found {
 		cm, found = fontmetrics.Lookup(fontmetrics.FontSize1Regular, cp)
@@ -287,18 +294,18 @@ var accentChar = map[string]rune{
 	// Text-mode accents — codepoints from upstream's symbols table.
 	// These differ from the math-mode versions (e.g. \\^ -> U+02C6, while
 	// math \\hat -> ASCII ^).
-	`\'`:         0x02CA, // ˊ
-	"\\`":        0x02CB, // ˋ
-	`\^`:         0x02C6, // ˆ
-	`\~`:         0x02DC, // ˜
-	`\=`:         0x02C9, // ˉ
-	`\u`:         0x02D8, // ˘
-	`\.`:         0x02D9, // ˙
-	`\"`:         0x00A8, // ¨
-	`\r`:         0x02DA, // ˚
-	`\H`:         0x02DD, // ˝
-	`\v`:         0x02C7, // ˇ
-	`\c`:         0x00B8, // ¸
+	`\'`:  0x02CA, // ˊ
+	"\\`": 0x02CB, // ˋ
+	`\^`:  0x02C6, // ˆ
+	`\~`:  0x02DC, // ˜
+	`\=`:  0x02C9, // ˉ
+	`\u`:  0x02D8, // ˘
+	`\.`:  0x02D9, // ˙
+	`\"`:  0x00A8, // ¨
+	`\r`:  0x02DA, // ˚
+	`\H`:  0x02DD, // ˝
+	`\v`:  0x02C7, // ˇ
+	`\c`:  0x00B8, // ¸
 }
 
 // layoutAccent stacks a math accent glyph above the base.
@@ -422,6 +429,9 @@ func layoutAccent(a *parser.Accent, opts Options) *Box {
 // mathtools \overbracket{body} / \underbracket{body}. Mirrors upstream
 // layout_horiz_brace.
 func layoutHorizBrace(h *parser.HorizBrace, opts Options) *Box {
+	if opts.MathJaxGlyphs {
+		return layoutMathJaxBrace(h, opts)
+	}
 	body := layoutNode(h.Base, opts)
 	w := body.Width
 	if w < 0.5 {
@@ -494,6 +504,10 @@ func layoutHorizBrace(h *parser.HorizBrace, opts Options) *Box {
 // \xhookleftarrow / \xLeftarrow / \xrightleftharpoons / etc. Mirrors
 // upstream layout_xarrow.
 func layoutXArrow(x *parser.XArrow, opts Options) *Box {
+	switch x.Label {
+	case `\xrightarrow`, `\xleftarrow`, `\xleftrightarrow`:
+		return layoutLabeledArrow(x, opts)
+	}
 	supStyle := opts.Style.Superscript()
 	subStyle := opts.Style.Subscript()
 	supRatio := supStyle.SizeMultiplier() / opts.Style.SizeMultiplier()
@@ -1237,88 +1251,8 @@ func layoutFramed(e *parser.Enclose, opts Options) *Box {
 // parseColor / parseColorPtr resolve a CSS-style color name or hex
 // string. Currently a stub: only handles a few names + #RGB / #RRGGBB.
 func parseColor(s string) (Color, bool) {
-	if s == "" {
-		return Black, false
-	}
-	switch s {
-	case "black":
-		return Color{0, 0, 0, 255}, true
-	case "white":
-		return Color{255, 255, 255, 255}, true
-	case "red":
-		return Color{255, 0, 0, 255}, true
-	case "green":
-		return Color{0, 128, 0, 255}, true
-	case "blue":
-		return Color{0, 0, 255, 255}, true
-	case "yellow":
-		return Color{255, 255, 0, 255}, true
-	case "cyan", "aqua":
-		return Color{0, 255, 255, 255}, true
-	case "magenta", "fuchsia":
-		return Color{255, 0, 255, 255}, true
-	case "orange":
-		return Color{255, 165, 0, 255}, true
-	case "purple":
-		return Color{128, 0, 128, 255}, true
-	case "gray", "grey":
-		return Color{128, 128, 128, 255}, true
-	case "lime":
-		return Color{0, 255, 0, 255}, true
-	case "navy":
-		return Color{0, 0, 128, 255}, true
-	case "teal":
-		return Color{0, 128, 128, 255}, true
-	case "olive":
-		return Color{128, 128, 0, 255}, true
-	case "maroon":
-		return Color{128, 0, 0, 255}, true
-	case "silver":
-		return Color{192, 192, 192, 255}, true
-	}
-	if len(s) >= 4 && s[0] == '#' {
-		hex := s[1:]
-		parseHex := func(c byte) (uint8, bool) {
-			switch {
-			case c >= '0' && c <= '9':
-				return c - '0', true
-			case c >= 'a' && c <= 'f':
-				return c - 'a' + 10, true
-			case c >= 'A' && c <= 'F':
-				return c - 'A' + 10, true
-			}
-			return 0, false
-		}
-		var rgb [3]uint8
-		ok := true
-		switch len(hex) {
-		case 3:
-			for i := 0; i < 3; i++ {
-				v, vok := parseHex(hex[i])
-				if !vok {
-					ok = false
-					break
-				}
-				rgb[i] = v*16 + v
-			}
-		case 6:
-			for i := 0; i < 3; i++ {
-				hi, ok1 := parseHex(hex[2*i])
-				lo, ok2 := parseHex(hex[2*i+1])
-				if !ok1 || !ok2 {
-					ok = false
-					break
-				}
-				rgb[i] = hi*16 + lo
-			}
-		default:
-			ok = false
-		}
-		if ok {
-			return Color{rgb[0], rgb[1], rgb[2], 255}, true
-		}
-	}
-	return Black, false
+	c, ok := colors.Parse(s)
+	return Color{R: c.R, G: c.G, B: c.B, A: c.A}, ok
 }
 
 func parseColorPtr(s *string) *Color {
@@ -1352,14 +1286,48 @@ var sizingMultipliers = []float64{
 // layoutSizing handles \tiny, \scriptsize, ..., \Huge — sizing
 // keywords. Builds inner at textstyle and wraps in a Scaled box if the
 // ratio differs from current.
+func sizingMultiplier(size int, mathJax bool) float64 {
+	mult := sizingMultipliers[size]
+	if mathJax {
+		switch size {
+		case 5:
+			mult = 0.85
+		case 9:
+			mult = 1.73
+		case 10:
+			mult = 2.07
+		case 11:
+			mult = 2.49
+		}
+	}
+	return mult
+}
+
 func layoutSizing(s *parser.Sizing, opts Options) *Box {
 	if int(s.Size) <= 0 || int(s.Size) >= len(sizingMultipliers) {
 		return layoutExpression(s.Body, opts, true)
 	}
-	mult := sizingMultipliers[s.Size]
+	mult := sizingMultiplier(int(s.Size), opts.MathJaxSizes)
 	innerOpts := opts.WithStyle(opts.Style.Text())
+	if opts.MathJaxSizes {
+		// TeX SetSize changes mathsize without changing scriptlevel.
+		innerOpts = opts
+		innerOpts.mathJaxSize = mult
+	}
 	inner := layoutExpression(s.Body, innerOpts, true)
 	ratio := mult / opts.SizeMultiplier()
+	if opts.MathJaxSizes {
+		// CommonWrapper.getScale uses the inherited absolute mathsize.
+		// Nested keywords replace that size rather than multiplying it.
+		parentSize := opts.mathJaxSize
+		if parentSize == 0 {
+			parentSize = 1
+		}
+		s := 1 / math.Sqrt(2)
+		scales := [3]float64{1, s, s * s}
+		scriptScale := scales[opts.Style.SizeIndex()]
+		ratio = (scriptScale * mult) / (scriptScale * parentSize)
+	}
 	if ratio > 0.999 && ratio < 1.001 {
 		return inner
 	}
@@ -1397,6 +1365,9 @@ func isSingleCharBody(n parser.Node) bool {
 // extends 0.2em past each edge). \sout draws a horizontal line at
 // -0.5*xHeight regardless.
 func layoutCancel(label string, node parser.Node, opts Options) *Box {
+	if notation, ok := map[string]string{`\cancel`: "updiagonalstrike", `\bcancel`: "downdiagonalstrike", `\xcancel`: "updiagonalstrike downdiagonalstrike"}[label]; ok {
+		return layoutDecorated(&parser.Decorated{Enclosure: true, Body: node, Notation: notation, Padding: .2335, Border: .067, BorderColor: ""}, opts)
+	}
 	inner := layoutNode(node, opts)
 	w := inner.Width
 	if w < 0.01 {

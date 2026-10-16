@@ -53,11 +53,17 @@ type Rect struct {
 
 // PathItem is an arbitrary SVG-style path (radicals, delimiters, …).
 type PathItem struct {
-	X        float64        `json:"x"`
-	Y        float64        `json:"y"`
-	Commands []path.Command `json:"commands"`
-	Fill     bool           `json:"fill"`
-	Color    Color          `json:"color"`
+	SystemOutline   bool           // SVG-local system glyph quantization before viewport scaling.
+	EllipseStroke   bool           `json:"ellipse_stroke,omitempty"`
+	ClippedExtender bool           `json:"clipped_extender,omitempty"`
+	RectStroke      bool           `json:"rect_stroke,omitempty"`
+	Butt            bool           `json:"butt,omitempty"` // bounded SVG line with flat caps
+	StrokeWidth     float64        `json:"stroke_width,omitempty"`
+	X               float64        `json:"x"`
+	Y               float64        `json:"y"`
+	Commands        []path.Command `json:"commands"`
+	Fill            bool           `json:"fill"`
+	Color           Color          `json:"color"`
 }
 
 // ToDisplayList walks a Box and emits absolute-position drawing commands.
@@ -65,9 +71,17 @@ type PathItem struct {
 // This is a starting port; many BoxContent variants currently emit no
 // items. It does count item totals so the parity harness can score.
 func ToDisplayList(b *Box) DisplayList {
+	dl := ToNominalDisplayList(b)
+	expandVisualBounds(&dl)
+	return dl
+}
+
+// ToNominalDisplayList preserves the layout box, including deliberate zero
+// dimensions from smash and lap. This is the SVG MathJax viewport contract;
+// callers wanting an ink-enclosing canvas retain ToDisplayList.
+func ToNominalDisplayList(b *Box) DisplayList {
 	dl := DisplayList{Width: b.Width, Height: b.Height, Depth: b.Depth}
 	emit(b, &dl, 0, 0, 1.0)
-	expandVisualBounds(&dl)
 	return dl
 }
 
@@ -281,7 +295,19 @@ func shiftItemY(it *DisplayItem, dy float64) {
 // So a glyph's baseline in parent em is `y + b.Height*scale`.
 func emit(b *Box, dl *DisplayList, x, y, scale float64) {
 	switch c := b.Content.(type) {
+	case Positioned:
+		for _, p := range c.Children {
+			emit(p.Box, dl, x+p.X*scale, y+(b.Height+p.Y-p.Box.Height*p.Scale)*scale, scale*p.Scale)
+		}
 	case Glyph:
+		if c.Outline != nil {
+			commands := make([]path.Command, len(c.Outline))
+			for i, cmd := range c.Outline {
+				commands[i] = scalePathCommand(cmd, scale)
+			}
+			dl.Items = append(dl.Items, PathItem{X: x, Y: y + b.Height*scale, Commands: commands, Fill: true, Color: b.Color})
+			break
+		}
 		dl.Items = append(dl.Items, GlyphPath{
 			X:        x,
 			Y:        y + b.Height*scale,
@@ -328,6 +354,12 @@ func emit(b *Box, dl *DisplayList, x, y, scale float64) {
 		denomWParent := c.Denom.Width * denomScale
 		numerCenterX := x + (b.Width*scale-numerWParent)/2
 		denomCenterX := x + (b.Width*scale-denomWParent)/2
+		if c.Align == "l" {
+			numerCenterX, denomCenterX = x+c.RulePadding*scale, x+c.RulePadding*scale
+		} else if c.Align == "r" {
+			numerCenterX = x + (b.Width-c.RulePadding)*scale - numerWParent
+			denomCenterX = x + (b.Width-c.RulePadding)*scale - denomWParent
+		}
 		numerY := y + (b.Height-c.NumerShift)*scale - c.Numer.Height*numerScale
 		denomY := y + (b.Height+c.DenomShift)*scale - c.Denom.Height*denomScale
 		emit(c.Numer, dl, numerCenterX, numerY, numerScale)
@@ -375,7 +407,7 @@ func emit(b *Box, dl *DisplayList, x, y, scale float64) {
 		if c.Sup != nil {
 			supScale := scale * c.SupScale
 			supTop := y + (b.Height-c.SupShift)*scale - c.Sup.Height*supScale
-			supX := x + baseW
+			supX := x + baseW + c.SupHKern*scale
 			if c.CenterScripts {
 				supX = x + (b.Width*scale-c.Sup.Width*supScale)/2
 			}
@@ -659,7 +691,7 @@ func emit(b *Box, dl *DisplayList, x, y, scale float64) {
 		}
 		dl.Items = append(dl.Items, PathItem{
 			X: x, Y: baselineY,
-			Commands: scaled, Fill: c.Fill, Color: b.Color,
+			Commands: scaled, Fill: c.Fill, Color: b.Color, StrokeWidth: c.StrokeWidth * scale,
 		})
 	case Angl:
 		// Body shares baseline at y + b.Height*scale. Path commands are

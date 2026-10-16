@@ -64,6 +64,8 @@ func readEnvName(p *Parser, ctx string) (string, error) {
 func envHandler(p *Parser, name string) (Node, error) {
 	base := strings.TrimSuffix(name, "*")
 	switch base {
+	case "multline":
+		return parseMultline(p)
 	case "matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix":
 		return handleMatrixEnv(p, name, base)
 	case "smallmatrix":
@@ -104,6 +106,8 @@ func handleAlignedEnv(p *Parser, name string) (Node, error) {
 	isAlignat := strings.Contains(base, "at")
 	isGather := base == "gather" || base == "gathered"
 	isEquation := base == "equation"
+	// equation.cjs uses MathJax default tags:none; do not invent numbers.
+	autoNumber := false
 
 	// alignat / alignedat take a {N} argument for column count. We read it
 	// (and currently ignore it; it's only used to validate column counts).
@@ -135,7 +139,7 @@ func handleAlignedEnv(p *Parser, name string) (Node, error) {
 
 	if isEquation {
 		var tags []ArrayTag
-		if !strings.HasSuffix(name, "*") {
+		if autoNumber && !strings.HasSuffix(name, "*") {
 			tags = make([]ArrayTag, len(rows))
 			for i := range tags {
 				p.equationCounter++
@@ -162,7 +166,7 @@ func handleAlignedEnv(p *Parser, name string) (Node, error) {
 		gatherSep := "gather"
 		var tags []ArrayTag
 		// gather auto-numbers; gathered does not.
-		if base == "gather" && !strings.HasSuffix(name, "*") {
+		if autoNumber && base == "gather" && !strings.HasSuffix(name, "*") {
 			tags = make([]ArrayTag, len(rows))
 			for i := range tags {
 				p.equationCounter++
@@ -224,7 +228,7 @@ func handleAlignedEnv(p *Parser, name string) (Node, error) {
 		sepType = "alignat"
 	}
 	// Auto-numbering: align/alignat (without *) and not split/aligned/alignedat.
-	autoNum := !strings.HasSuffix(name, "*") && base != "split" && base != "aligned" && base != "alignedat"
+	autoNum := autoNumber && !strings.HasSuffix(name, "*") && base != "split" && base != "aligned" && base != "alignedat"
 	// Detect \nonumber / \notag in each row's cells and strip them; the row
 	// then gets a `false` auto-tag (no number), matching upstream.
 	rowHasNoNumber := make([]bool, len(rows))
@@ -372,6 +376,9 @@ func parseArrayBody(p *Parser, cellStyle StyleStr) ([][]Node, []*Measurement, []
 			return nil, nil, nil, err
 		}
 		rows = append(rows, row)
+		if len(rows)*rowMaxCols(rows) > 10000 {
+			return nil, nil, nil, errMsg("array cell budget exceeded")
+		}
 		if p.cur.Text == `\\` || p.cur.Text == `\cr` {
 			p.advance()
 			rowGaps = append(rowGaps, nil)
@@ -463,13 +470,13 @@ func handleMatrixEnv(p *Parser, fullName, base string) (Node, error) {
 		cols[i] = AlignSpec{Type: AlignTypeAlign, Align: &c}
 	}
 	arr := &Array{
-		Mode:            p.mode,
-		Body:            rows,
-		RowGaps:         rowGaps,
-		HLinesBeforeRow: hlines,
-		Cols:            cols,
+		Mode:              p.mode,
+		Body:              rows,
+		RowGaps:           rowGaps,
+		HLinesBeforeRow:   hlines,
+		Cols:              cols,
 		HskipBeforeAndAft: boolPtr(false),
-		ArrayStretch:    1.0,
+		ArrayStretch:      1.0,
 	}
 	if delims == [2]string{} {
 		return arr, nil
@@ -629,5 +636,5 @@ func buildEmptyHLines(rows int) [][]bool {
 	return out
 }
 
-func boolPtr(b bool) *bool       { return &b }
-func strPtr(s string) *string    { return &s }
+func boolPtr(b bool) *bool    { return &b }
+func strPtr(s string) *string { return &s }

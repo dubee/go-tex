@@ -161,7 +161,7 @@ func DrawInto(pdf *fpdf.Fpdf, dl layout.DisplayList, x, y float64, opts Options)
 		case layout.GlyphPath:
 			drawGlyph(pdf, v, x, y, opts, em)
 		case layout.Rect:
-			drawRect(pdf, v)
+			drawRect(pdf, v, x, y, opts, em)
 		case layout.Line:
 			drawLine(pdf, v, x, y, opts, em)
 		case layout.PathItem:
@@ -237,12 +237,12 @@ func drawGlyph(pdf *fpdf.Fpdf, g layout.GlyphPath, ox, oy float64, opts Options,
 	pdf.Text(x, y, string(g.CharCode))
 }
 
-func drawRect(pdf *fpdf.Fpdf, r layout.Rect) {
+func drawRect(pdf *fpdf.Fpdf, r layout.Rect, ox, oy float64, opts Options, em float64) {
 	if r.Width <= 0 || r.Height <= 0 {
 		return
 	}
 	pdf.SetFillColor(int(r.Color.R), int(r.Color.G), int(r.Color.B))
-	pdf.Rect(r.X, r.Y, r.Width, r.Height, "F")
+	pdf.Rect(ox+r.X*em+opts.Padding, oy+r.Y*em+opts.Padding, r.Width*em, r.Height*em, "F")
 }
 
 func drawLine(pdf *fpdf.Fpdf, l layout.Line, ox, oy float64, opts Options, em float64) {

@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -32,28 +33,41 @@ func errMsg(msg string) *Error { return &Error{Message: msg} }
 
 // endOfExpression are the token texts that terminate an expression list.
 var endOfExpression = map[string]struct{}{
-	"}":           {},
-	`\endgroup`:   {},
-	`\end`:        {},
-	`\right`:      {},
-	"&":           {},
+	"}":         {},
+	`\endgroup`: {},
+	`\end`:      {},
+	`\right`:    {},
+	"&":         {},
 }
 
 // implicitCommands are control sequences that are valid even though no
 // function or symbol is registered for them — they are handled inline
 // (sup/sub, \limits, \nolimits).
 var implicitCommands = map[string]struct{}{
-	"^":          {},
-	"_":          {},
-	`\limits`:    {},
-	`\nolimits`:  {},
+	"^":         {},
+	"_":         {},
+	`\limits`:   {},
+	`\nolimits`: {},
 }
 
 // Parse parses a LaTeX math input string into the top-level body. It is the
 // public entry point matching upstream `parse(&str)`.
 func Parse(input string) ([]Node, error) {
-	p := newParser(stripOuterMathDelimiters(input))
+	return ParseContext(context.Background(), input)
+}
+
+// ParseContext cooperatively cancels tokenization and macro expansion.
+func ParseContext(ctx context.Context, input string) ([]Node, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p := &Parser{gullet: macroexp.New(stripOuterMathDelimiters(input), macroexp.ModeMath), mode: ModeMath, ctx: ctx}
+	p.gullet.SetContext(ctx)
+	p.advance()
 	body, err := p.parseExpression(false, "")
+	if p.err != nil {
+		return nil, p.err
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +94,12 @@ func stripOuterMathDelimiters(input string) string {
 
 // Parser holds the recursive-descent state. Construct with newParser.
 type Parser struct {
+	ctx    context.Context
 	gullet *macroexp.Expander
 	cur    lexer.Token
+	err    error
+	depth  int
+	tokens int
 	mode   Mode
 
 	// equationCounter is incremented for each auto-numbered equation row
@@ -97,10 +115,23 @@ func newParser(input string) *Parser {
 }
 
 func (p *Parser) advance() {
+	if p.ctx != nil && p.ctx.Err() != nil {
+		p.err = p.ctx.Err()
+	}
+	if p.err != nil {
+		p.cur = lexer.EOF(p.gullet.Pos())
+		return
+	}
+	p.tokens++
+	if p.tokens > 100000 {
+		p.err = errMsg("token limit exceeded")
+		p.cur = lexer.EOF(p.gullet.Pos())
+		return
+	}
 	t, err := p.gullet.Next()
 	if err != nil {
-		// Macro expansion errors surface here as a synthetic EOF; the
-		// resulting parse will fail with a clear error in the caller.
+		// Preserve the error even when EOF is syntactically valid here.
+		p.err = err
 		t = lexer.EOF(p.gullet.Pos())
 	}
 	p.cur = t
@@ -139,6 +170,11 @@ func (p *Parser) expect(text string) error {
 
 // parseExpression parses a list of atoms until an end-of-expression token.
 func (p *Parser) parseExpression(breakOnInfix bool, breakOnText string) ([]Node, error) {
+	p.depth++
+	defer func() { p.depth-- }()
+	if p.depth > 256 {
+		return nil, errMsg("nesting limit exceeded")
+	}
 	body := []Node{}
 	for {
 		if p.mode == ModeMath {

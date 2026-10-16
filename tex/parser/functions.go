@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"github.com/luo-studio/go-tex/tex/colors"
 	"strings"
 
 	"github.com/luo-studio/go-tex/tex/source"
@@ -14,6 +15,14 @@ import (
 func functionDispatch(p *Parser, callerName, breakOnText string) (Node, error) {
 	cmd := p.cur.Text
 	switch cmd {
+	case `\unicode`:
+		return parseUnicode(p)
+	case `\bbox`, `\enclose`:
+		return parseDecorated(p)
+	case `\prescript`, `\sideset`:
+		return parseMultiScripts(p)
+	case `\cancelto`:
+		return parseCancelTo(p)
 	case `\begin`:
 		return parseEnvironment(p)
 	case `\frac`, `\dfrac`, `\tfrac`, `\cfrac`:
@@ -169,6 +178,9 @@ func parseColor(p *Parser) (Node, error) {
 		return nil, err
 	}
 	color := flattenSymbolText(colorArg)
+	if _, ok := colors.Parse(color); !ok {
+		return nil, errMsg("unsupported color: " + color)
+	}
 	if cmd == `\color` {
 		body, err := p.parseExpression(true, "")
 		if err != nil {
@@ -252,6 +264,25 @@ func parseFunctionArg(p *Parser, name string) (Node, error) {
 func parseFrac(p *Parser) (Node, error) {
 	cmd := p.cur.Text
 	p.advance()
+	align := ""
+	if cmd == `\cfrac` {
+		p.consumeSpaces()
+		if p.cur.Text == "[" {
+			p.advance()
+			var raw strings.Builder
+			for !p.cur.IsEOF() && p.cur.Text != "]" {
+				raw.WriteString(p.cur.Text)
+				p.advance()
+			}
+			if err := p.expect("]"); err != nil {
+				return nil, err
+			}
+			align = strings.TrimSpace(raw.String())
+			if align != "" && align != "l" && align != "r" {
+				return nil, errAt(`Illegal alignment specified in \cfrac`, p.cur)
+			}
+		}
+	}
 	numer, err := parseFunctionArg(p, cmd)
 	if err != nil {
 		return nil, err
@@ -263,6 +294,7 @@ func parseFrac(p *Parser) (Node, error) {
 	frac := &GenFrac{
 		Mode:       p.mode,
 		Continued:  cmd == `\cfrac`,
+		Align:      align,
 		Numer:      numer,
 		Denom:      denom,
 		HasBarLine: true,
@@ -518,7 +550,7 @@ var (
 	}
 )
 
-func isMathAccent(cmd string) bool { _, ok := mathAccents[cmd]; return ok }
+func isMathAccent(cmd string) bool  { _, ok := mathAccents[cmd]; return ok }
 func isAccentUnder(cmd string) bool { _, ok := accentUnders[cmd]; return ok }
 
 func parseMathAccent(p *Parser) (Node, error) {

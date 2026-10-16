@@ -4,12 +4,16 @@ import (
 	"github.com/luo-studio/go-tex/tex/fontmetrics"
 	"github.com/luo-studio/go-tex/tex/parser"
 	"github.com/luo-studio/go-tex/tex/symbols"
+	"math"
 )
 
 // layoutExpression is the inner entry point for laying out a node list.
 // It interleaves children with TeX atom-spacing kerns, mirroring the
 // upstream engine's layout_expression.
 func layoutExpression(nodes []parser.Node, opts Options, isRealGroup bool) *Box {
+	if opts.MathJaxGlyphs {
+		nodes = mathJaxNegations(nodes)
+	}
 	if len(nodes) == 0 {
 		return NewEmpty()
 	}
@@ -129,7 +133,13 @@ func layoutNode(n parser.Node, opts Options) *Box {
 	case *parser.Spacing:
 		return layoutSpacingNode(v.Text, opts)
 	case *parser.GenFrac:
+		if opts.MathJaxGlyphs && mathJaxBinomial(v) {
+			return layoutMathJaxBinomial(v, opts)
+		}
 		barThickness := opts.Metrics().DefaultRuleThickness
+		if opts.MathJaxFractionMetrics {
+			barThickness = .06
+		}
 		if !v.HasBarLine {
 			barThickness = 0
 		}
@@ -137,6 +147,11 @@ func layoutNode(n parser.Node, opts Options) *Box {
 			barThickness = measurementToEm(*v.BarSize, opts)
 		}
 		frac := layoutFraction(v.Numer, v.Denom, barThickness, v.Continued, opts)
+		if v.Continued && v.Align != "" {
+			f := frac.Content.(Fraction)
+			f.Align, f.RulePadding = v.Align, opts.FractionRulePadding
+			frac.Content = f
+		}
 		hasL := v.LeftDelim != nil && *v.LeftDelim != "" && *v.LeftDelim != "."
 		hasR := v.RightDelim != nil && *v.RightDelim != "" && *v.RightDelim != "."
 		if hasL || hasR {
@@ -177,7 +192,7 @@ func layoutNode(n parser.Node, opts Options) *Box {
 		// of \\nulldelimiterspace each side (1.2pt = 0.12em).
 		pad := 0.12
 		rightPad := pad
-		if v.Continued {
+		if v.Continued && !opts.MathJaxGlyphs {
 			rightPad = 0
 		}
 		return makeHBox([]*Box{NewKern(pad), frac, NewKern(rightPad)}, opts.Color)
@@ -202,6 +217,11 @@ func layoutNode(n parser.Node, opts Options) *Box {
 	case *parser.MClass:
 		return layoutExpression(v.Body, opts, true)
 	case *parser.Styling:
+		if opts.MathJaxGlyphs && len(v.Body) == 1 {
+			if f, ok := v.Body[0].(*parser.GenFrac); ok && f.Continued {
+				return layoutNode(f, opts)
+			}
+		}
 		var style = opts.Style
 		switch v.Style {
 		case parser.StyleDisplay:
@@ -219,6 +239,15 @@ func layoutNode(n parser.Node, opts Options) *Box {
 		// parent style, wrap in a Scaled box so display-list emit
 		// multiplies child scale.
 		ratio := style.SizeMultiplier() / opts.Style.SizeMultiplier()
+		if opts.MathJaxSideScripts {
+			s := 1 / math.Sqrt(2)
+			scales := [3]float64{1, s, s * s}
+			size := opts.mathJaxSize
+			if size == 0 {
+				size = 1
+			}
+			ratio = (scales[style.SizeIndex()] * size) / (scales[opts.Style.SizeIndex()] * size)
+		}
 		if ratio != 1.0 {
 			return &Box{
 				Width: body.Width * ratio, Height: body.Height * ratio, Depth: body.Depth * ratio,
@@ -252,6 +281,9 @@ func layoutNode(n parser.Node, opts Options) *Box {
 		// Spacing inside text is plain horizontal concatenation without
 		// atom-class glue.
 		textOpts := opts
+		if opts.MathJaxGlyphs {
+			textOpts.FontOverride = "Main-Regular"
+		}
 		if v.Font != nil {
 			if fid := mathFontToKaTeX(*v.Font); fid != "" {
 				textOpts.FontOverride = fid
@@ -281,6 +313,9 @@ func layoutNode(n parser.Node, opts Options) *Box {
 	case *parser.Internal, *parser.NoNumber:
 		return NewEmpty()
 	case *parser.Array:
+		if opts.MathJaxGlyphs {
+			return layoutMathJaxTable(v, opts)
+		}
 		return layoutArray(v, opts)
 	case *parser.Enclose:
 		switch v.Label {
@@ -291,9 +326,28 @@ func layoutNode(n parser.Node, opts Options) *Box {
 		case `\cancel`, `\bcancel`, `\xcancel`, `\sout`:
 			return layoutCancel(v.Label, v.Body, opts)
 		case `\fbox`, `\fcolorbox`, `\colorbox`:
+			if opts.MathJaxGlyphs {
+				return layoutMathJaxColorBox(v, opts)
+			}
 			return layoutFramed(v, opts)
 		}
 		return layoutNode(v.Body, opts)
+	case *parser.Unicode:
+		return layoutUnicode(v, opts)
+	case *parser.Decorated:
+		if opts.MathJaxGlyphs && !v.Enclosure {
+			return layoutMathJaxCSSBox(v, opts)
+		}
+		return layoutDecorated(v, opts)
+	case *parser.Multline:
+		if opts.MathJaxGlyphs {
+			return layoutMathJaxMultline(v, opts)
+		}
+		return layoutMultline(v, opts)
+	case *parser.MultiScripts:
+		return layoutMultiScripts(v, opts)
+	case *parser.CancelTo:
+		return layoutCancelTo(v, opts)
 	case *parser.HorizBrace:
 		return layoutHorizBrace(v, opts)
 	case *parser.RaiseBox:
@@ -364,7 +418,7 @@ func layoutNode(n parser.Node, opts Options) *Box {
 			}
 			children = append(children, &Box{
 				Width: cm.Width, Height: cm.Height, Depth: cm.Depth,
-				Color: linkColor,
+				Color:   linkColor,
 				Content: Glyph{FontID: "Typewriter-Regular", CharCode: r},
 			})
 		}
@@ -372,7 +426,7 @@ func layoutNode(n parser.Node, opts Options) *Box {
 		rt := opts.Metrics().DefaultRuleThickness
 		return &Box{
 			Width: inner.Width, Height: inner.Height, Depth: inner.Depth + 3*rt,
-			Color: linkColor,
+			Color:   linkColor,
 			Content: Underline{Body: inner, RuleThickness: rt},
 		}
 	case *parser.Rule:
@@ -503,6 +557,32 @@ func layoutSymbol(text string, mode parser.Mode, opts Options) *Box {
 	font := opts.FontOverride
 	if font == "" {
 		font = selectFont(text, resolved, mode)
+	}
+	if opts.MathJaxGlyphs {
+		if font == "AMS-Regular" {
+			font = "Main-Regular"
+		}
+		if g, ok := pinnedMathJaxGlyph(font, resolved); ok {
+			if g.Chars != "" {
+				children := []Placed{}
+				offset := 0.0
+				childOpts := opts
+				childOpts.FontOverride = font
+				for _, cp := range g.Chars {
+					child := layoutSymbol(string(cp), parser.ModeText, childOpts)
+					children = append(children, Placed{Box: child, X: offset, Scale: 1})
+					offset += child.Width
+				}
+				return &Box{Width: g.Width, Height: g.Height, Depth: g.Depth, Color: opts.Color, Content: Positioned{Children: children}}
+			}
+
+			advance := g.Width
+			if mode == parser.ModeMath {
+				advance += g.Italic
+			}
+			return &Box{Width: advance, Height: g.Height, Depth: g.Depth, Color: opts.Color,
+				Content: Glyph{FontID: font, CharCode: resolved, Outline: g.commands}}
+		}
 	}
 	cm, ok := fontmetrics.LookupWithFallback(font, resolved)
 	if !ok && opts.FontOverride != "" {
@@ -763,4 +843,3 @@ func makeHBox(children []*Box, color Color) *Box {
 	}
 	return &Box{Width: w, Height: h, Depth: d, Color: color, Content: HBox{Children: children}}
 }
-

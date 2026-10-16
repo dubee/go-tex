@@ -3,6 +3,7 @@ package layout
 import (
 	"github.com/luo-studio/go-tex/tex/fontmetrics"
 	"github.com/luo-studio/go-tex/tex/parser"
+	"math"
 )
 
 // shouldUseOpLimits decides whether base+sup+sub should be drawn as a
@@ -26,6 +27,9 @@ func shouldUseOpLimits(base parser.Node, opts Options) bool {
 // with sub stacked below, sup stacked above. Mirrors upstream
 // layout_op_with_limits + layout_op_limits_inner.
 func layoutOpWithLimits(base parser.Node, sup, sub parser.Node, opts Options) *Box {
+	if opts.MathJaxGlyphs {
+		return layoutMathJaxLimits(base, sup, sub, opts)
+	}
 	var baseBox *Box
 	suppressBaseShift := false
 	switch v := base.(type) {
@@ -176,6 +180,9 @@ func opSymbolSlant(b *Box) float64 {
 // layoutSupSubNode implements TeXbook Rule 18 (super-/subscript shifts).
 // Mirrors upstream's layout_supsub in engine.rs.
 func layoutSupSubNode(base, sup, sub parser.Node, opts Options) *Box {
+	if hb, ok := base.(*parser.HorizBrace); ok && opts.MathJaxGlyphs {
+		return layoutMathJaxBraceScript(hb, sup, sub, opts)
+	}
 	if base != nil && shouldUseOpLimits(base, opts) {
 		return layoutOpWithLimits(base, sup, sub, opts)
 	}
@@ -194,6 +201,9 @@ func layoutSupSubNode(base, sup, sub parser.Node, opts Options) *Box {
 	} else {
 		baseBox = NewEmpty()
 	}
+	if opts.MathJaxGlyphs && isCharacterBox(base) {
+		return layoutMathJaxCharacterScripts(baseBox, sup, sub, opts)
+	}
 	isCharBox := isCharacterBox(base)
 	metrics := opts.Metrics()
 	scriptSpace := 0.5 / metrics.PtPerEm / opts.SizeMultiplier()
@@ -202,6 +212,19 @@ func layoutSupSubNode(base, sup, sub parser.Node, opts Options) *Box {
 	subStyle := opts.Style.Subscript()
 	supRatio := supStyle.SizeMultiplier() / opts.Style.SizeMultiplier()
 	subRatio := subStyle.SizeMultiplier() / opts.Style.SizeMultiplier()
+	if opts.MathJaxSideScripts {
+		// CommonWrapper.getScale multiplies the capped script scale by
+		// inherited mathsize BEFORE dividing by the parent's absolute scale.
+		s := 1 / math.Sqrt(2)
+		scales := [3]float64{1, s, s * s}
+		size := opts.mathJaxSize
+		if size == 0 {
+			size = 1
+		}
+		parent := scales[opts.Style.SizeIndex()] * size
+		supRatio = (scales[supStyle.SizeIndex()] * size) / parent
+		subRatio = (scales[subStyle.SizeIndex()] * size) / parent
+	}
 
 	var supBox, subBox *Box
 	if sup != nil {
@@ -272,7 +295,7 @@ func layoutSupSubNode(base, sup, sub parser.Node, opts Options) *Box {
 		supShift = baseBox.Height + 0.2 + supD
 	}
 	if horizBraceUnder && subBox != nil {
-		subShift = baseBox.Depth + 0.2 + subH
+		subShift = baseBox.Depth + 0.15 + subH
 	}
 
 	// KaTeX supsub.js: for SymbolNode bases, subscripts get

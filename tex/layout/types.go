@@ -24,6 +24,27 @@ var Black = Color{0, 0, 0, 255}
 // Options carry the math style and other rendering knobs through the layout
 // recursion.
 type Options struct {
+	// MathJaxGlyphs selects pinned Roman ASCII/minus and italic Latin metrics
+	// and outlines. Other fonts and characters retain the existing engine.
+	MathJaxGlyphs bool
+	// SystemUnicode holds caller-resolved, baseline-relative em outlines.
+	SystemUnicode map[rune][]path.Command
+	// MathJaxSizes selects the pinned TeX SetSize keyword multipliers.
+	MathJaxSizes bool
+	// MathJaxSideScripts selects capped absolute script scales for ordinary
+	// side scripts only; operator limits and other constructors are unchanged.
+	MathJaxSideScripts bool
+	mathJaxSize        float64 // inherited explicit size keyword, zero means 1
+	// FractionRulePadding adds parent-em overhang on each side of ruled fractions.
+	// Zero preserves upstream layout; MathJax SVG uses 0.1 em.
+	FractionRulePadding float64
+	// FractionScriptScale overrides fraction child scaling at both script levels.
+	// Absolute scales are 1, s, s*s, capped at the second level. Zero preserves
+	// upstream sizing. Other script constructors and custom MathML sizes are unchanged.
+	FractionScriptScale float64
+	// MathJaxFractionMetrics selects pinned MathJax ruled-fraction defaults.
+	// Unruled fractions retain upstream metrics.
+	MathJaxFractionMetrics bool
 	Style                  mathstyle.Style
 	Color                  Color
 	AlignRelationSpacing   *float64 // capped relation spacing inside align/aligned
@@ -81,26 +102,26 @@ func NewRule(w, h, d, thickness, raise float64) *Box {
 // Content is the discriminated body of a Box.
 type Content interface{ contentMarker() }
 
-func (Empty) contentMarker()    {}
-func (Kern) contentMarker()     {}
-func (Rule) contentMarker()     {}
-func (Glyph) contentMarker()    {}
-func (HBox) contentMarker()     {}
-func (VBox) contentMarker()     {}
-func (Fraction) contentMarker() {}
-func (SupSub) contentMarker()   {}
-func (Radical) contentMarker()  {}
-func (OpLimits) contentMarker() {}
-func (Accent) contentMarker()   {}
-func (LeftRight) contentMarker(){}
-func (Array) contentMarker()    {}
-func (SvgPath) contentMarker()  {}
-func (Framed) contentMarker()   {}
-func (RaiseBox) contentMarker() {}
-func (Scaled) contentMarker()   {}
-func (Angl) contentMarker()     {}
-func (Overline) contentMarker() {}
-func (Underline) contentMarker(){}
+func (Empty) contentMarker()     {}
+func (Kern) contentMarker()      {}
+func (Rule) contentMarker()      {}
+func (Glyph) contentMarker()     {}
+func (HBox) contentMarker()      {}
+func (VBox) contentMarker()      {}
+func (Fraction) contentMarker()  {}
+func (SupSub) contentMarker()    {}
+func (Radical) contentMarker()   {}
+func (OpLimits) contentMarker()  {}
+func (Accent) contentMarker()    {}
+func (LeftRight) contentMarker() {}
+func (Array) contentMarker()     {}
+func (SvgPath) contentMarker()   {}
+func (Framed) contentMarker()    {}
+func (RaiseBox) contentMarker()  {}
+func (Scaled) contentMarker()    {}
+func (Angl) contentMarker()      {}
+func (Overline) contentMarker()  {}
+func (Underline) contentMarker() {}
 
 // Empty is the zero-content placeholder.
 type Empty struct{}
@@ -116,6 +137,8 @@ type Rule struct {
 
 // Glyph is a single character drawn from a KaTeX font.
 type Glyph struct {
+	// Non-nil Outline replaces the font outline, in em with baseline y-down.
+	Outline  []path.Command
 	FontID   string
 	CharCode rune
 }
@@ -152,6 +175,8 @@ type VBoxKern struct {
 
 // Fraction is numerator-over-denominator with optional bar.
 type Fraction struct {
+	Align        string
+	RulePadding  float64
 	Numer        *Box
 	Denom        *Box
 	NumerShift   float64
@@ -172,6 +197,7 @@ type SupSub struct {
 	SubScale         float64
 	CenterScripts    bool
 	ItalicCorrection float64
+	SupHKern         float64
 	SubHKern         float64
 }
 
@@ -239,8 +265,9 @@ type Array struct {
 
 // SvgPath is a vector path used for arrows, braces, etc.
 type SvgPath struct {
-	Commands []path.Command
-	Fill     bool
+	StrokeWidth float64 // em; zero uses renderer default
+	Commands    []path.Command
+	Fill        bool
 }
 
 // Framed is a body wrapped in a (possibly drawn) border with optional fill.

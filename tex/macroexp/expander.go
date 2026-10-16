@@ -9,6 +9,7 @@
 package macroexp
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -32,29 +33,34 @@ type FnMacro func(*Expander) ([]lexer.Token, error)
 // Definition is one of: a simple text expansion, a pre-tokenised list, or
 // a function. Text expansions are lexed lazily on first use.
 type Definition struct {
-	Text   string
-	Tokens []lexer.Token // already in stack order (reversed)
-	Fn     FnMacro
-	NumArg int // for arg-based macros (not yet honoured)
+	Text       string
+	Tokens     []lexer.Token // already in stack order (reversed)
+	Fn         FnMacro
+	NumArg     int
+	DefaultArg *string // optional first argument, nil when all arguments are required
 }
 
 // Expander wraps a Lexer and exposes a stream of tokens with macros expanded.
 type Expander struct {
-	lex     *lexer.Lexer
-	mode    Mode
-	stack   []lexer.Token
-	macros  map[string]Definition
-	expand  int // recursion guard
-	maxExp  int
+	ctx          context.Context
+	environments map[string]environment
+	activeEnvs   []string
+	lex          *lexer.Lexer
+	mode         Mode
+	stack        []lexer.Token
+	macros       map[string]Definition
+	expand       int // recursion guard
+	maxExp       int
 }
 
 // New returns an Expander over input in the given starting mode.
 func New(input string, mode Mode) *Expander {
 	e := &Expander{
-		lex:    lexer.New(input),
-		mode:   mode,
-		macros: defaultMacros(),
-		maxExp: 10000,
+		lex:          lexer.New(input),
+		mode:         mode,
+		macros:       defaultMacros(),
+		maxExp:       10000,
+		environments: map[string]environment{},
 	}
 	return e
 }
@@ -92,10 +98,20 @@ func (e *Expander) Future() lexer.Token {
 }
 
 // Next returns the next non-expandable token.
+func (e *Expander) SetContext(ctx context.Context) { e.ctx = ctx }
 func (e *Expander) Next() (lexer.Token, error) {
 	for {
+		if e.ctx != nil && e.ctx.Err() != nil {
+			return lexer.EOF(e.Pos()), e.ctx.Err()
+		}
+		if len(e.stack) > 100000 {
+			return lexer.EOF(e.Pos()), fmt.Errorf("macro token stack limit exceeded")
+		}
 		t := e.pop()
 		if t.IsEOF() {
+			if len(e.activeEnvs) > 0 {
+				return t, fmt.Errorf("unclosed custom environment")
+			}
 			return t, nil
 		}
 		if t.NoExpand {
@@ -116,7 +132,7 @@ func (e *Expander) Next() (lexer.Token, error) {
 			}
 			e.stack = append(e.stack, toks...)
 		case def.Tokens != nil:
-			toks, err := expandTokens(e, def.Tokens, def.NumArg)
+			toks, err := expandTokens(e, def.Tokens, def.NumArg, def.DefaultArg)
 			if err != nil {
 				return t, err
 			}
@@ -142,9 +158,21 @@ func (e *Expander) Next() (lexer.Token, error) {
 // macro expansion in stack order: body tokens with #1, #2, … replaced by
 // the corresponding arg's tokens. Body tokens preserve their original
 // source positions; arg tokens carry the positions from the invocation.
-func expandTokens(e *Expander, body []lexer.Token, numArgs int) ([]lexer.Token, error) {
+func expandTokens(e *Expander, body []lexer.Token, numArgs int, defaultArg *string) ([]lexer.Token, error) {
 	args := make([][]lexer.Token, numArgs)
-	for i := 0; i < numArgs; i++ {
+	start := 0
+	if defaultArg != nil {
+		raw, has, err := e.optional()
+		if err != nil {
+			return nil, err
+		}
+		if !has {
+			raw = *defaultArg
+		}
+		args[0] = lexBodySource(raw)
+		start = 1
+	}
+	for i := start; i < numArgs; i++ {
 		toks, err := e.consumeArgTokens()
 		if err != nil {
 			return nil, fmt.Errorf("reading arg %d: %w", i+1, err)
@@ -424,6 +452,10 @@ func defaultMacros() map[string]Definition {
 	m[`\gdef`] = Definition{Fn: handleDef(false, false)}
 	m[`\edef`] = Definition{Fn: handleDef(false, true)}
 	m[`\xdef`] = Definition{Fn: handleDef(false, true)}
+	m[`\newenvironment`] = Definition{Fn: defineEnvironment(false)}
+	m[`\renewenvironment`] = Definition{Fn: defineEnvironment(true)}
+	m[`\begin`] = Definition{Fn: expandEnvironment(true)}
+	m[`\end`] = Definition{Fn: expandEnvironment(false)}
 	m[`\newcommand`] = Definition{Fn: handleNewCommand(true, false)}
 	m[`\renewcommand`] = Definition{Fn: handleNewCommand(false, true)}
 	m[`\providecommand`] = Definition{Fn: handleNewCommand(true, true)}
@@ -669,7 +701,7 @@ func discardOneArg(e *Expander) ([]lexer.Token, error) {
 
 // handleNewCommand returns a function macro for \newcommand / \renewcommand
 // / \providecommand. Reads `\name`, optional `[N]` (arg count), optional
-// `[default]` (for first-arg default — not yet honoured), and a body.
+// `[default]` for the first argument, and a body.
 func handleNewCommand(allowNew, allowExisting bool) FnMacro {
 	return func(e *Expander) ([]lexer.Token, error) {
 		// Skip spaces.
@@ -704,35 +736,9 @@ func handleNewCommand(allowNew, allowExisting bool) FnMacro {
 		if !e.HasMacro(name) && !allowNew {
 			return nil, fmt.Errorf("\\newcommand: %s is not yet defined", name)
 		}
-		// Optional [num]
-		numArgs := 0
-		for {
-			t := e.pop()
-			if t.IsSpace() {
-				continue
-			}
-			if t.Text == "[" {
-				var raw []byte
-				for {
-					tt := e.pop()
-					if tt.Text == "]" {
-						break
-					}
-					if tt.IsEOF() {
-						return nil, fmt.Errorf("\\newcommand: unterminated [num]")
-					}
-					raw = append(raw, tt.Text...)
-				}
-				s := strings.TrimSpace(string(raw))
-				if len(s) > 0 && s[0] >= '0' && s[0] <= '9' {
-					numArgs = int(s[0] - '0')
-				}
-				continue
-			}
-			// Optional default for first arg `[default]` is also possible;
-			// skip it for the minimal implementation.
-			e.Push(t)
-			break
+		numArgs, defaultArg, err := e.argumentSpec()
+		if err != nil {
+			return nil, err
 		}
 		// Read the body group.
 		t := e.pop()
@@ -760,7 +766,10 @@ func handleNewCommand(allowNew, allowExisting bool) FnMacro {
 			// providecommand: keep existing definition, discard new one.
 			return nil, nil
 		}
-		e.macros[name] = Definition{Tokens: body, NumArg: numArgs}
+		if err := validateParameters(body, numArgs); err != nil {
+			return nil, err
+		}
+		e.macros[name] = Definition{Tokens: body, NumArg: numArgs, DefaultArg: defaultArg}
 		return nil, nil
 	}
 }
@@ -934,7 +943,7 @@ func (e *Expander) expandTokensFully(tokens []lexer.Token) ([]lexer.Token, error
 			}
 			e.stack = append(e.stack, toks...)
 		case def.Tokens != nil:
-			toks, err := expandTokens(e, def.Tokens, def.NumArg)
+			toks, err := expandTokens(e, def.Tokens, def.NumArg, def.DefaultArg)
 			if err != nil {
 				e.stack = saved
 				return nil, err

@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"github.com/luo-studio/go-tex/tex/colors"
 	"strings"
 
 	"github.com/luo-studio/go-tex/tex/source"
@@ -40,6 +41,9 @@ func parseEnclose(p *Parser) (Node, error) {
 			return nil, err
 		}
 		c := flattenSymbolText(colorArg)
+		if _, ok := colors.Parse(c); !ok {
+			return nil, errMsg("unsupported background color: " + c)
+		}
 		return &Enclose{Mode: p.mode, Label: cmd, BackgroundColor: &c, Body: body}, nil
 	case `\fcolorbox`:
 		borderArg, err := parseFunctionArg(p, cmd)
@@ -56,6 +60,12 @@ func parseEnclose(p *Parser) (Node, error) {
 		}
 		bc := flattenSymbolText(borderArg)
 		bg := flattenSymbolText(bgArg)
+		if _, ok := colors.Parse(bc); !ok {
+			return nil, errMsg("unsupported border color: " + bc)
+		}
+		if _, ok := colors.Parse(bg); !ok {
+			return nil, errMsg("unsupported background color: " + bg)
+		}
 		return &Enclose{Mode: p.mode, Label: cmd, BorderColor: &bc, BackgroundColor: &bg, Body: body}, nil
 	}
 	return nil, errAt("unknown enclose function "+cmd, p.cur)
@@ -388,16 +398,12 @@ func parseXArrow(p *Parser) (Node, error) {
 	if p.cur.Text == "[" {
 		openTok := p.cur
 		p.advance()
-		// Match upstream: parse one group (a brace group or a single
-		// symbol) rather than a full expression. This ensures
-		// `[{X}]` produces ordgroup{X} (not ordgroup{[ordgroup{X}]}).
-		body, err := p.parseGroup(cmd, "")
+		nodes, err := p.parseExpression(false, "]")
 		if err != nil {
 			return nil, err
 		}
-		if body == nil {
-			body = &OrdGroup{Mode: p.mode}
-		}
+		var body Node = &OrdGroup{Mode: p.mode, Body: nodes}
+
 		closeTok := p.cur
 		if err := p.expect("]"); err != nil {
 			return nil, err
